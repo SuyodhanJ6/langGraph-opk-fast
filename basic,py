@@ -1,0 +1,81 @@
+
+import os
+os.environ["GROQ_API_KEY"] = ""
+os.environ["TAVILY_API_KEY"] = ""  # For the search tool
+
+
+from typing import Annotated
+from typing_extensions import TypedDict
+from langchain_groq import ChatGroq
+
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode, tools_condition
+
+# First, define what state we want to store
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+
+# Create graph builder with our state
+graph_builder = StateGraph(State)
+
+# Create search tool and LLM
+search_tool = TavilySearchResults(max_results=2)
+llm = ChatGroq(
+    temperature=0.1,
+    model_name="mixtral-8x7b-32768",  # You can also use "llama2-70b-4096"
+)
+
+# Bind the tool to the LLM so it knows how to use it
+llm_with_tools = llm.bind_tools([search_tool])
+
+# Define the chatbot node that will generate responses
+def chatbot(state: State):
+    return {"messages": [llm_with_tools.invoke(state["messages"])]}
+
+# Add nodes to graph
+graph_builder.add_node("chatbot", chatbot)
+tool_node = ToolNode(tools=[search_tool])
+graph_builder.add_node("tools", tool_node)
+
+# Add edges - this defines how nodes are connected
+graph_builder.add_conditional_edges(
+    "chatbot",
+    tools_condition,
+)
+graph_builder.add_edge("tools", "chatbot")
+graph_builder.add_edge(START, "chatbot")
+
+# Compile the graph
+graph = graph_builder.compile()
+
+# Function to run the agent
+def run_agent(user_input: str, thread_id: str = "1"):
+    config = {"configurable": {"thread_id": thread_id}}
+    events = graph.stream(
+        {"messages": [("user", user_input)]}, 
+        config, 
+        stream_mode="values"
+    )
+    
+    # Process responses
+    for event in events:
+        if "messages" in event:
+            message = event["messages"][-1]
+            if hasattr(message, "content"):
+                print(f"Assistant: {message.content}")
+            else:
+                print(f"Assistant used tool: {message.tool_calls[0]['name']}")
+
+# Example usage
+if __name__ == "__main__":
+    print("Chat with the agent (type 'exit' to quit)")
+    thread_id = "1"
+    
+    while True:
+        user_input = input("User: ")
+        if user_input.lower() in ["exit", "quit", "q"]:
+            break
+            
+        run_agent(user_input, thread_id)
